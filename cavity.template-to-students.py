@@ -63,23 +63,24 @@ six = 6.0
 
 # -------- User sets inputs here  --------
 
-nmax = 500000             # Maximum number of iterations
+nmax = 500000            # Maximum number of iterations
 iterout = 500            # Number of time steps between solution output
 imms = 1                  # Manufactured solution flag: = 1 for manuf. sol., = 0 otherwise
 isgs = 0                  # Symmetric Gauss-Seidel  flag: = 1 for SGS, = 0 for point Jacobi
 # Restart flag: = 1 for restart (file 'restart.in', = 0 for initial run
-irstr = 1
+irstr = 0
 # Order of pressure gradient: 0 = 2nd, 1 = 3rd (not needed)
 ipgorder = 0
 # variable to be used as the limiter sensor (= 0 for pressure)
 lim = 0
 residualOut = 10          # Number of timesteps between residual output
 
-cfl = 0.5               # CFL number used to determine time step
-Cx = 0.01               # Parameter for 4th order artificial viscosity in x
-Cy = 0.01               # Parameter for 4th order artificial viscosity in y
-toler = 1.e-10          # Tolerance for iterative residual convergence
-rkappa = 0.1            # Time derivative preconditioning constant
+cfl = 0.50              # CFL number used to determine time step
+Cx = 1e-6              # Parameter for 4th order artificial viscosity in x
+Cy = 1e-6              # Parameter for 4th order artificial viscosity in y
+
+toler = 1.e-6          # Tolerance for iterative residual convergence
+rkappa = 0.7            # Time derivative preconditioning constant
 Re = 100.0              # Reynolds number = rho*Uinf*L/rmu
 # Initial pressure (N/m^2) -> from MMS value at cavity center
 pinf = 0.801333844662
@@ -298,9 +299,41 @@ def bndry():
 
     # This applies the cavity boundary conditions
 
-    # !************************************************************** */
-    # !************ADD CODING HERE FOR INTRO CFD STUDENTS************ */
-    # !************************************************************** */
+    # Bottom wall: no-slip, stationary wall
+    j = 0
+    for i in range(0, imax):
+        u[i, j, 1] = zero   # u-velocity
+        u[i, j, 2] = zero   # v-velocity
+
+    # Top wall: moving lid, u = uinf, v = 0 
+    j = jmax - 1
+    for i in range(0, imax):
+        u[i, j, 1] = uinf   # moving lid
+        u[i, j, 2] = zero   # no penetration
+
+    # Left wall: no-slip
+    i = 0
+    for j in range(0, jmax):
+        u[i, j, 1] = zero
+        u[i, j, 2] = zero
+
+    # Right wall: no-slip
+    i = imax - 1
+    for j in range(0, jmax):
+        u[i, j, 1] = zero
+        u[i, j, 2] = zero
+
+    # Pressure boundary condition
+    
+    # Bottom and top wall
+    for i in range(0, imax):
+        u[i, 0, 0] = u[i, 1, 0] # bottom - j =0 
+        u[i, jmax - 1, 0] = u[i, jmax - 2, 0]# top - j = jmax-1
+
+    # Left and right walls
+    for j in range(0, jmax):
+        u[0, j, 0] = u[1, j, 0] # i = 0
+        u[imax - 1, j, 0] = u[imax - 2, j, 0] # i = imax - 1
 
 # ************************************************************************
 
@@ -425,8 +458,8 @@ def write_output(n, resinit, rtime):
     fp3.write(str(resinit[0])+" "+str(resinit[1])+" "+str(resinit[2])+"\n")
     for j in np.arange(0, jmax, 1):
         for i in np.arange(0, imax, 1):
-            x = (xmax - xmin)*(i)/(imax-1 - 1)
-            y = (ymax - ymin)*(j)/(jmax-1 - 1)
+            x = (xmax - xmin)*(i)/(imax - 1)
+            y = (ymax - ymin)*(j)/(jmax - 1)
             fp3.write(str(x)+" "+str(y)+" " +
                       str(u[i, j, 0])+" "+str(u[i, j, 1])+" "+str(u[i, j, 2])+"\n")
     fp3.close()
@@ -631,9 +664,36 @@ def compute_time_step(dtmin):
     global vel2ref, rmu, rho, dx, dy, cfl, rkappa, imax, jmax
     global u, dt
 
-    # !**************************************************************
-    # !************ADD CODING HERE FOR INTRO CFD STUDENTS************
-    # !**************************************************************
+     # constant viscous time step limit
+    hmin = min(dx, dy)
+    dtvisc = 0.25 * rho * hmin*hmin / rmu
+
+    dtmin = 1.0e99  # initialize global minimum
+
+    for i in range(1, imax-1):
+        for j in range(1, jmax-1):
+
+            uij = u[i,j,1]
+            vij = u[i,j,2]
+
+            uvel2 = uij*uij + vij*vij
+            beta2 = max(uvel2, rkappa*vel2ref)
+
+
+            lambda_x = abs(uij) + math.sqrt(beta2)
+            lambda_y = abs(vij) + math.sqrt(beta2)
+
+            # convective restriction
+            lambda_max = (lambda_x + lambda_y) / hmin
+            dtconv = cfl / lambda_max
+
+            # local time step
+            dt_ij = min(dtconv, dtvisc)
+            dt[i,j] = dt_ij
+
+            # update global min
+            if dt_ij < dtmin:
+                dtmin = dt_ij
 
     return dtmin
 
@@ -668,9 +728,37 @@ def Compute_Artificial_Viscosity():
     global u
     global artviscx, artviscy
 
-    # !************************************************************** */
-    # !************ADD CODING HERE FOR INTRO CFD STUDENTS************ */
-    # !************************************************************** */
+    # artificial viscosity arrays
+    artviscx[:, :] = 0.0
+    artviscy[:, :] = 0.0
+
+    # "Sensor" variable
+    phi = u[:, :, lim]
+
+    # 2 interior points on each side for 4th derivative
+    for i in range(2, imax-2):
+        for j in range(2, jmax-2):
+
+            # Local velocity squared
+            uij = u[i, j, 1]
+            vij = u[i, j, 2]
+            uvel2 = uij*uij + vij*vij
+         
+
+            beta2 = max(uvel2, rkappa*vel2ref)
+
+            # Eigenvalues in x and y directions
+            lambda_x = abs(uij) + math.sqrt(beta2)
+            lambda_y = abs(vij) + math.sqrt(beta2)
+
+            d4pdx4 = (phi[i-2, j] - four*phi[i-1, j] + six*phi[i, j]
+                - four*phi[i+1, j] + phi[i+2, j])
+
+            d4pdy4 = (phi[i, j-2] - four*phi[i, j-1] + six*phi[i, j]
+                - four*phi[i, j+1] + phi[i, j+2])
+
+            artviscx[i, j] = -beta2 * Cx * abs(lambda_x) * d4pdx4
+            artviscy[i, j] = -beta2 * Cy * abs(lambda_y) * d4pdy4
 
 # ************************************************************************
 
@@ -777,11 +865,63 @@ def point_Jacobi():
     global imax, jmax, rho, rhoinv, dx, dy, rkappa, rmu, vel2ref
     global u, uold, artviscx, artviscy, dt, s
 
-    # Point Jacobi method
+    # Point Jacobi method - uses uold for all neighbor values
+    p_old = uold[:, :, 0]
+    u_old = uold[:, :, 1]
+    v_old = uold[:, :, 2]
 
-    # !************************************************************** */
-    # !************ADD CODING HERE FOR INTRO CFD STUDENTS************ */
-    # !************************************************************** */
+    for i in range(1, imax-1):
+        for j in range(1, jmax-1):
+            dt_ij = dt[i, j]
+            if (dt_ij <= 0.0) or (not np.isfinite(dt_ij)):
+                continue
+
+            # All derivatives use old values (Point Jacobi)
+            dpdx = (p_old[i+1, j] - p_old[i-1, j]) / (two*dx)
+            dpdy = (p_old[i, j+1] - p_old[i, j-1]) / (two*dy)
+
+            dudx = (u_old[i+1, j] - u_old[i-1, j]) / (two*dx)
+            dudy = (u_old[i, j+1] - u_old[i, j-1]) / (two*dy)
+
+            dvdx = (v_old[i+1, j] - v_old[i-1, j]) / (two*dx)
+            dvdy = (v_old[i, j+1] - v_old[i, j-1]) / (two*dy)
+
+            d2udx2 = (u_old[i+1, j] - two*u_old[i, j] + u_old[i-1, j]) / (dx*dx)
+            d2udy2 = (u_old[i, j+1] - two*u_old[i, j] + u_old[i, j-1]) / (dy*dy)
+
+            d2vdx2 = (v_old[i+1, j] - two*v_old[i, j] + v_old[i-1, j]) / (dx*dx)
+            d2vdy2 = (v_old[i, j+1] - two*v_old[i, j] + v_old[i, j-1]) / (dy*dy)
+
+            uij = u_old[i, j]
+            vij = v_old[i, j]
+            uvel2 = uij*uij + vij*vij
+            beta2 = max(uvel2, rkappa*vel2ref)
+
+            # Continuity residual
+            R0 = (dudx + dvdy) - s[i, j, 0]
+
+            # x-momentum residual
+            conv_u = uij*dudx + vij*dudy
+            diff_u = d2udx2 + d2udy2
+            dSdx = (artviscx[i+1, j] - artviscx[i-1, j]) / (two * dx)
+            R1 = rho*conv_u + dpdx - rmu*diff_u - s[i, j, 1] + dSdx
+
+            # y-momentum residual
+            conv_v = uij*dvdx + vij*dvdy
+            diff_v = d2vdx2 + d2vdy2
+            dSdy = (artviscy[i, j+1] - artviscy[i, j-1]) / (two * dy)
+            R2 = rho*conv_v + dpdy - rmu*diff_v - s[i, j, 2] + dSdy
+
+            # Approximate diagonal terms
+            D0 = rho*beta2
+            D1 = rho + 2.0*rmu*(1.0/(dx*dx) + 1.0/(dy*dy))
+            D2 = rho + 2.0*rmu*(1.0/(dx*dx) + 1.0/(dy*dy))
+
+            # Point Jacobi update
+            u[i, j, 0] = uold[i, j, 0] - dt_ij * (R0 / D0)
+            u[i, j, 1] = uold[i, j, 1] - dt_ij * (R1 / D1)
+            u[i, j, 2] = uold[i, j, 2] - dt_ij * (R2 / D2)
+
 
 # ************************************************************************
 
@@ -832,15 +972,65 @@ def check_iterative_convergence(n, res, resinit, ninit, rtime, dtmin):
     # j                        # j index (y direction)
     # k                        # k index (# of equations)
 
-    global zero
-    global imax, jmax, neq, fsmall
-    global u, uold, dt, fp1
+    global zero, two
+    global imax, jmax, neq, fsmall, dx, dy, rho, rmu
+    global u, uold, dt, fp1, s, artviscx, artviscy
 
     # Compute iterative residuals to monitor iterative convergence
 
-    # !************************************************************** */
-    # !************ADD CODING HERE FOR INTRO CFD STUDENTS************ */
-    # !************************************************************** */
+    num_nodes = (imax-2) * (jmax-2)  # Only interior points
+    
+    res_sum = np.zeros(neq)
+    
+    for i in range(1, imax-1):
+        for j in range(1, jmax-1):
+            # Compute derivatives using CURRENT solution
+            dpdx = (u[i+1, j, 0] - u[i-1, j, 0]) / (two*dx)
+            dpdy = (u[i, j+1, 0] - u[i, j-1, 0]) / (two*dy)
+
+            dudx = (u[i+1, j, 1] - u[i-1, j, 1]) / (two*dx)
+            dudy = (u[i, j+1, 1] - u[i, j-1, 1]) / (two*dy)
+
+            dvdx = (u[i+1, j, 2] - u[i-1, j, 2]) / (two*dx)
+            dvdy = (u[i, j+1, 2] - u[i, j-1, 2]) / (two*dy)
+
+            d2udx2 = (u[i+1, j, 1] - two*u[i, j, 1] + u[i-1, j, 1]) / (dx*dx)
+            d2udy2 = (u[i, j+1, 1] - two*u[i, j, 1] + u[i, j-1, 1]) / (dy*dy)
+
+            d2vdx2 = (u[i+1, j, 2] - two*u[i, j, 2] + u[i-1, j, 2]) / (dx*dx)
+            d2vdy2 = (u[i, j+1, 2] - two*u[i, j, 2] + u[i, j-1, 2]) / (dy*dy)
+
+            uij = u[i, j, 1]
+            vij = u[i, j, 2]
+
+            # Steady-state residuals (absolute values, then square)
+            R0 = dudx + dvdy - s[i, j, 0]
+            
+            conv_u = uij*dudx + vij*dudy
+            diff_u = d2udx2 + d2udy2
+            dSdx = (artviscx[i+1, j] - artviscx[i-1, j]) / (two * dx)
+            R1 = rho*conv_u + dpdx - rmu*diff_u - s[i, j, 1] + dSdx
+            
+            conv_v = uij*dvdx + vij*dvdy
+            diff_v = d2vdx2 + d2vdy2
+            dSdy = (artviscy[i, j+1] - artviscy[i, j-1]) / (two * dy)
+            R2 = rho*conv_v + dpdy - rmu*diff_v - s[i, j, 2] + dSdy
+
+            res_sum[0] += R0*R0
+            res_sum[1] += R1*R1
+            res_sum[2] += R2*R2
+
+    # L2 norms
+    for k in range(neq):
+        res_k = math.sqrt(res_sum[k] / max(num_nodes, 1))
+        
+        if n == ninit:
+            resinit[k] = max(res_k, fsmall)
+        
+        res[k] = res_k / (resinit[k] + fsmall)
+
+    # Maximum residual
+    conv = max(res[0], res[1], res[2])
 
     # Write iterative residuals every 10 iterations
     if n % 10 == 0 or n == ninit:
@@ -878,11 +1068,26 @@ def Discretization_Error_Norms(rL1norm, rL2norm, rLinfnorm):
 
     if imms == 1:
 
-        # !**************************************************************
-        # !************ADD CODING HERE FOR INTRO CFD STUDENTS************
-        #!***************************************************************
+        num_nodes = imax * jmax
 
-        return  # remove this once you add code
+        for k in range(neq):
+            L1 = 0.0
+            L2 = 0.0
+            Linf = 0.0
+
+            for i in range(imax):
+                for j in range(jmax):
+                    DE = u[i, j, k] - ummsArray[i, j, k]
+                    absDE = abs(DE)
+
+                    L1 += absDE
+                    L2 += DE*DE
+                    if absDE > Linf:
+                        Linf = absDE
+
+            rL1norm[k] = L1 / max(num_nodes, 1)
+            rL2norm[k] = math.sqrt(L2 / max(num_nodes, 1))
+            rLinfnorm[k] = Linf
 
     # ***************************************************************************
 
